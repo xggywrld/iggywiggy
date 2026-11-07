@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS projects_done (
 """
 
 EWMA_ALPHA = 0.5  # weight of the newest attempt in an item's score
+MAX_INTERVAL_DAYS = 365.0  # never schedule a review more than a year ahead
 LESSON_WEIGHT = 0.2
 
 
@@ -115,7 +116,8 @@ def sm2(state: ReviewState, quality: int) -> ReviewState:
     elif reps == 2:
         interval = 6.0
     else:
-        interval = round(state.interval_days * ease, 1)
+        interval = round(min(state.interval_days, MAX_INTERVAL_DAYS) * ease, 1)
+    interval = min(interval, MAX_INTERVAL_DAYS)
     return ReviewState(ease=ease, interval_days=interval, repetitions=reps,
                        lapses=state.lapses)
 
@@ -207,8 +209,16 @@ class ProgressStore:
                 (learner, item_id, topic_id, kind, int(bool(correct)), source, _iso(when)))
             row = c.execute("SELECT * FROM reviews WHERE learner_id=? AND item_id=?",
                             (learner, item_id)).fetchone()
+            # min() also repairs oversized intervals saved by older versions.
             state = ReviewState() if row is None else ReviewState(
-                row["ease"], row["interval_days"], row["repetitions"], row["lapses"])
+                row["ease"], min(row["interval_days"], MAX_INTERVAL_DAYS),
+                row["repetitions"], row["lapses"])
+            # Answering correctly again *before* the item is due (e.g. resubmitting a
+            # quiz) isn't a spaced-repetition review, so it must not stretch the
+            # schedule. A wrong answer, however, always resets it.
+            if row is not None and correct and _iso(when) < row["due_at"] \
+                    and row["interval_days"] <= MAX_INTERVAL_DAYS:
+                return state
             # Retrying immediately after a mistake shouldn't count as a perfect recall.
             recent_fail = False
             if row is not None and correct:

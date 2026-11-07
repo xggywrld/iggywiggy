@@ -135,3 +135,40 @@ def test_streak_and_reset(store):
     store.reset(l)
     assert store.attempt_stats(l)["attempts"] == 0
     assert store.project_steps_done(l, "p1") == set()
+
+
+def test_repeated_correct_answers_never_overflow(store):
+    """Regression: resubmitting a quiz many times crashed with OverflowError."""
+    l = store.learner_id("x")
+    for _ in range(300):
+        state = store.record_attempt(l, "q", "t01", "mcq", True, source="quiz")
+    assert state.interval_days <= 365
+
+
+def test_early_correct_review_does_not_stretch_schedule(store):
+    l = store.learner_id("x")
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    first = store.record_attempt(l, "q", "t01", "mcq", True, when=t0)
+    again = store.record_attempt(l, "q", "t01", "mcq", True, when=t0 + timedelta(minutes=5))
+    assert again.interval_days == first.interval_days == 1
+    # Once it is actually due, a correct answer advances it (1 -> 6 days).
+    due = store.record_attempt(l, "q", "t01", "mcq", True, when=t0 + timedelta(days=1, hours=1))
+    assert due.interval_days == 6
+
+
+def test_early_wrong_answer_still_resets(store):
+    l = store.learner_id("x")
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.record_attempt(l, "q", "t01", "mcq", True, when=t0)
+    store.record_attempt(l, "q", "t01", "mcq", True, when=t0 + timedelta(days=2))
+    wrong = store.record_attempt(l, "q", "t01", "mcq", False, when=t0 + timedelta(days=3))
+    assert wrong.interval_days == 1 and wrong.lapses == 1
+
+
+def test_corrupt_huge_interval_in_old_database_is_repaired(store):
+    l = store.learner_id("x")
+    store.record_attempt(l, "q", "t01", "mcq", True)
+    with store._conn() as c:
+        c.execute("UPDATE reviews SET interval_days = 1e9, due_at = '2026-01-01T00:00:00+00:00'")
+    state = store.record_attempt(l, "q", "t01", "mcq", True)
+    assert state.interval_days <= 365
